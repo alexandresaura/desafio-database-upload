@@ -18,7 +18,7 @@ class Transaction {
   @Column()
   title: string;
 
-  @Column('numeric')
+  @Column('decimal')
   value: number;
 
   @Column()

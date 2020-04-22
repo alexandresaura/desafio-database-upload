@@ -1,141 +1,89 @@
-import { getRepository, getCustomRepository } from 'typeorm';
-
+import { getCustomRepository, getRepository, In } from 'typeorm';
+import csvParse from 'csv-parse';
 import fs from 'fs';
-import path from 'path';
-import uploadConfig from '../config/upload';
-
-import AppError from '../errors/AppError';
 
 import Transaction from '../models/Transaction';
-import TransactionsRepository from '../repositories/TransactionsRepository';
-
 import Category from '../models/Category';
 
-interface Request {
-  filename: string;
-}
+import TransactionRepository from '../repositories/TransactionsRepository';
 
-interface TransactionCSV {
-  [key: string]: string;
+interface CSVTransaction {
+  title: string;
+  type: 'income' | 'outcome';
+  value: number;
+  category: string;
 }
 
 class ImportTransactionsService {
-  async execute({ filename }: Request): Promise<Transaction[]> {
-    const transactionsRepository = getCustomRepository(TransactionsRepository);
+  async execute(filePath: string): Promise<Transaction[]> {
+    const transactionRepository = getCustomRepository(TransactionRepository);
+    const categoriesRepository = getRepository(Category);
 
-    const filepath = path.join(uploadConfig.directory, filename);
+    const contactsReadStream = fs.createReadStream(filePath);
 
-    const data = fs.readFileSync(filepath, 'UTF-8');
-    await fs.promises.unlink(filepath);
-
-    const lines = data.split(/\r?\n/);
-
-    const props: string[] = [];
-    const transactionsCSV: TransactionCSV[] = [];
-
-    lines.forEach((line, index) => {
-      if (line) {
-        if (!index) {
-          line.split(',').forEach(prop => props.push(prop.trim()));
-        } else {
-          const transactionCSV: TransactionCSV = {};
-
-          line.split(',').forEach((value, valueIndex) => {
-            transactionCSV[props[valueIndex]] = value.trim();
-          });
-
-          transactionsCSV.push(transactionCSV);
-        }
-      }
+    const parsers = csvParse({
+      from_line: 2,
     });
 
-    const income = transactionsCSV
-      .filter(transactionCSV => transactionCSV.type === 'income')
-      .reduce(
-        (total, transactionCSV) => total + Number(transactionCSV.value),
-        0,
+    const parseCSV = contactsReadStream.pipe(parsers);
+
+    const transactions: CSVTransaction[] = [];
+    const categories: string[] = [];
+
+    parseCSV.on('data', async line => {
+      const [title, type, value, category] = line.map((cell: string) =>
+        cell.trim(),
       );
 
-    const outcome = transactionsCSV
-      .filter(transactionCSV => transactionCSV.type === 'outcome')
-      .reduce(
-        (total, transactionCSV) => total + Number(transactionCSV.value),
-        0,
-      );
-
-    const totalCSV = income - outcome;
-
-    if (totalCSV < 0) {
-      const balance = await transactionsRepository.getBalance();
-      if (balance.total - totalCSV < 0) {
-        throw new AppError('The balance should not be negative');
+      if (!title || !type || !value || !category) {
+        return;
       }
-    }
 
-    const categories = Array.from(
-      new Set(transactionsCSV.map(transactionCSV => transactionCSV.category)),
+      categories.push(category);
+
+      transactions.push({ title, type, value, category });
+    });
+
+    await new Promise(resolve => parseCSV.on('end', resolve));
+
+    const existentCategories = await categoriesRepository.find({
+      where: {
+        title: In(categories),
+      },
+    });
+
+    const existentCategoriesTitles = existentCategories.map(
+      category => category.title,
     );
 
-    const transactions: {
-      title: string;
-      value: number;
-      type: 'income' | 'outcome';
-      category_id: string;
-    }[] = [];
+    const addCategoryTitles = categories
+      .filter(category => !existentCategoriesTitles.includes(category))
+      .filter((value, index, self) => self.indexOf(value) === index);
 
-    const categoriesRespository = getRepository(Category);
-    await Promise.all(
-      categories.map(async category => {
-        const findCategoryByTitle = await categoriesRespository.findOne({
-          where: {
-            title: category,
-          },
-        });
-
-        let category_id: string;
-        if (!findCategoryByTitle) {
-          const newCategory = categoriesRespository.create({
-            title: category,
-          });
-
-          await categoriesRespository.save(newCategory);
-
-          category_id = newCategory.id;
-        } else {
-          category_id = findCategoryByTitle.id;
-        }
-
-        transactionsCSV.forEach(transactionCSV => {
-          if (transactionCSV.category === category) {
-            transactions.push({
-              title: transactionCSV.title,
-              value: Number(transactionCSV.value),
-              type: transactionCSV.type as 'income' | 'outcome',
-              category_id,
-            });
-          }
-        });
-      }),
+    const newCategories = categoriesRepository.create(
+      addCategoryTitles.map(title => ({ title })),
     );
 
-    const newTransactions = await Promise.all(
-      transactions.map(async transaction => {
-        const { title, value, type, category_id } = transaction;
+    await categoriesRepository.save(newCategories);
 
-        const newTransaction = transactionsRepository.create({
-          title,
-          value,
-          type,
-          category_id,
-        });
+    const finalCategories = [...newCategories, ...existentCategories];
 
-        await transactionsRepository.save(newTransaction);
-
-        return newTransaction;
-      }),
+    const createdTransactions = transactionRepository.create(
+      transactions.map(transaction => ({
+        title: transaction.title,
+        type: transaction.type,
+        value: transaction.value,
+        category: finalCategories.find(
+          category => category.title === transaction.category,
+        ),
+      })),
     );
 
-    return newTransactions;
+    await transactionRepository.save(createdTransactions);
+
+    await fs.promises.unlink(filePath);
+
+    return createdTransactions;
   }
 }
 

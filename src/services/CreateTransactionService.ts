@@ -1,10 +1,9 @@
 import { getRepository, getCustomRepository } from 'typeorm';
-
 import AppError from '../errors/AppError';
 
-import Transaction from '../models/Transaction';
 import TransactionsRepository from '../repositories/TransactionsRepository';
 
+import Transaction from '../models/Transaction';
 import Category from '../models/Category';
 
 interface Request {
@@ -22,45 +21,39 @@ class CreateTransactionService {
     category,
   }: Request): Promise<Transaction> {
     const transactionsRepository = getCustomRepository(TransactionsRepository);
+    const categoriesRespository = getRepository(Category);
 
     if (type === 'outcome') {
-      const balance = await transactionsRepository.getBalance();
-      if (balance.total - value < 0) {
+      const { total } = await transactionsRepository.getBalance();
+      if (total - value < 0) {
         throw new AppError('The balance should not be negative');
       }
     }
 
-    const categoriesRespository = getRepository(Category);
-
-    const findCategoryByTitle = await categoriesRespository.findOne({
+    let transactionCategory = await categoriesRespository.findOne({
       where: {
         title: category,
       },
     });
 
-    let category_id: string;
-    if (!findCategoryByTitle) {
-      const newCategory = categoriesRespository.create({
+    if (!transactionCategory) {
+      transactionCategory = categoriesRespository.create({
         title: category,
       });
 
-      await categoriesRespository.save(newCategory);
-
-      category_id = newCategory.id;
-    } else {
-      category_id = findCategoryByTitle.id;
+      await categoriesRespository.save(transactionCategory);
     }
 
-    const newTransaction = transactionsRepository.create({
+    const transaction = transactionsRepository.create({
       title,
       value,
       type,
-      category_id,
+      category: transactionCategory,
     });
 
-    await transactionsRepository.save(newTransaction);
+    await transactionsRepository.save(transaction);
 
-    return newTransaction;
+    return transaction;
   }
 }
 

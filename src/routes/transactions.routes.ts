@@ -15,21 +15,9 @@ transactionsRouter.get('/', async (request, response) => {
   const transactionsRepository = getCustomRepository(TransactionsRepository);
 
   const transactions = await transactionsRepository.find();
-
-  const cleanTransactions = transactions.map(transaction => {
-    const cleanTransaction = {
-      id: transaction.id,
-      title: transaction.title,
-      value: transaction.value,
-      type: transaction.type,
-    };
-
-    return cleanTransaction;
-  });
-
   const balance = await transactionsRepository.getBalance();
 
-  response.send({ transactions: cleanTransactions, balance });
+  return response.json({ transactions, balance });
 });
 
 transactionsRouter.post('/', async (request, response) => {
@@ -63,9 +51,9 @@ transactionsRouter.post(
   async (request, response) => {
     const importTransactionsService = new ImportTransactionsService();
 
-    const transactions = await importTransactionsService.execute({
-      filename: request.file.filename,
-    });
+    const transactions = await importTransactionsService.execute(
+      request.file.path,
+    );
 
     return response.json(transactions);
   },
